@@ -111,6 +111,53 @@ static LSTATUS get_commands( HKEY key, const WCHAR *value, WCHAR *buffer, DWORD 
     return res;
 }
 
+/* Roblox Studio may be copied into a Wine prefix without the protocol
+ * association normally installed by its Windows installer. In that case the
+ * browser callback has already returned to Wine, but ShellExecute reports
+ * SE_ERR_NOASSOC. Forward only this private callback to the Studio process
+ * which launched winebrowser. */
+static BOOL dispatch_studio_auth_callback( const WCHAR *callback_url )
+{
+    PROCESS_BASIC_INFORMATION process_info;
+    STARTUPINFOW startup = { sizeof(startup) };
+    PROCESS_INFORMATION process;
+    HANDLE parent;
+    WCHAR image[32768], command_line[49152];
+    WCHAR *basename;
+    DWORD image_size = ARRAY_SIZE(image);
+
+    if (NtQueryInformationProcess( GetCurrentProcess(), ProcessBasicInformation,
+                                   &process_info, sizeof(process_info), NULL ))
+        return FALSE;
+
+    parent = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                          (DWORD)process_info.InheritedFromUniqueProcessId );
+    if (!parent) return FALSE;
+
+    if (!QueryFullProcessImageNameW( parent, 0, image, &image_size ))
+    {
+        CloseHandle( parent );
+        return FALSE;
+    }
+    CloseHandle( parent );
+
+    basename = wcsrchr( image, L'\\' );
+    basename = basename ? basename + 1 : image;
+    if (wcsicmp( basename, L"RobloxStudioBeta.exe" )) return FALSE;
+
+    if (swprintf( command_line, ARRAY_SIZE(command_line), L"\"%s\" \"%s\"",
+                  image, callback_url ) < 0)
+        return FALSE;
+
+    if (!CreateProcessW( image, command_line, NULL, NULL, FALSE, DETACHED_PROCESS,
+                         NULL, NULL, &startup, &process ))
+        return FALSE;
+
+    CloseHandle( process.hThread );
+    CloseHandle( process.hProcess );
+    return TRUE;
+}
+
 static int open_http_url( const WCHAR *url )
 {
     static const WCHAR defaultbrowsers[] =
@@ -150,6 +197,9 @@ static int open_http_url( const WCHAR *url )
                 free( url_utf8 );
                 if (!chars) return 1;
                 result = ShellExecuteW( NULL, L"open", callback_url, NULL, NULL, SW_SHOWNORMAL );
+                if ((ULONG_PTR)result == SE_ERR_NOASSOC &&
+                    dispatch_studio_auth_callback( callback_url ))
+                    return 0;
                 if ((ULONG_PTR)result <= 32)
                     WINE_ERR( "could not dispatch the Studio authentication callback (error %Id)\\n",
                               (ULONG_PTR)result );

@@ -125,6 +125,39 @@ static int open_http_url( const WCHAR *url )
     HKEY key;
     LONG r;
 
+    /* The iOS host cannot spawn xdg-open or a desktop browser. Ask Madeira to
+     * open Safari; OAuth callbacks are returned through the registered URL
+     * scheme and then dispatched back into Wine via ShellExecuteW. On other
+     * hosts the private sentinel simply fails to spawn and normal browser
+     * discovery below continues. */
+    {
+        char *url_utf8 = strdup_unixcp( url );
+        char callback_utf8[16384] = {0};
+        char *bridge_argv[] = { "madeira-ios-open-url", url_utf8, callback_utf8, NULL };
+        if (url_utf8 && !__wine_unix_spawnvp( bridge_argv, FALSE ))
+        {
+            if (!callback_utf8[0])
+            {
+                free( url_utf8 );
+                return 0;
+            }
+            else
+            {
+                WCHAR callback_url[16384];
+                HINSTANCE result;
+                int chars = MultiByteToWideChar( CP_UTF8, 0, callback_utf8, -1,
+                                                  callback_url, ARRAY_SIZE(callback_url) );
+                free( url_utf8 );
+                if (!chars) return 1;
+                result = ShellExecuteW( NULL, L"open", callback_url, NULL, NULL, SW_SHOWNORMAL );
+                if ((ULONG_PTR)result <= 32)
+                    WINE_ERR( "could not dispatch the Studio authentication callback (error %Id)\n",
+                              (ULONG_PTR)result );
+                return (ULONG_PTR)result > 32 ? 0 : 1;
+            }
+        }
+        free( url_utf8 );
+    }
     /* @@ Wine registry key: HKCU\Software\Wine\WineBrowser */
     if  (!(r = RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\WineBrowser", &key )))
     {

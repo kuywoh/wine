@@ -181,7 +181,15 @@ static int open_http_url( const WCHAR *url )
         char *url_utf8 = strdup_unixcp( url );
         char callback_utf8[16384] = {0};
         char *bridge_argv[] = { "madeira-ios-open-url", url_utf8, callback_utf8, NULL };
-        if (url_utf8 && !__wine_unix_spawnvp( bridge_argv, FALSE ))
+        NTSTATUS bridge_status = STATUS_NO_MEMORY;
+        if (url_utf8)
+        {
+            WINE_WARN( "[StudioAuth] winebrowser requested iOS external-browser handoff\n" );
+            bridge_status = __wine_unix_spawnvp( bridge_argv, FALSE );
+            WINE_WARN( "[StudioAuth] iOS browser handoff status=%08x callback_received=%s\n",
+                       (unsigned int)bridge_status, callback_utf8[0] ? "yes" : "no" );
+        }
+        if (url_utf8 && !bridge_status)
         {
             if (!callback_utf8[0])
             {

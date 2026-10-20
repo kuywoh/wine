@@ -241,6 +241,11 @@ static const unsigned int dir_data_names_initial_size  = 64;
 static struct dir_data **dir_data_cache;
 static unsigned int dir_data_cache_size;
 
+#ifdef WINE_IOS
+/* set while querying a directory we want per-entry detail for */
+static BOOL ios_dir_trace;
+#endif
+
 static BOOL show_dot_files;
 static mode_t start_umask;
 
@@ -2464,11 +2469,24 @@ static NTSTATUS get_dir_data_entry( struct dir_data *dir_data, void *info_ptr, I
 
     if (get_file_info( names->unix_name, &st, &attributes, &reparse_tag ) == -1)
     {
+#ifdef WINE_IOS
+        if (ios_dir_trace)
+            ERR( "iosdir-entry: %s stat failed errno=%d\n", debugstr_a(names->unix_name), errno );
+#endif
         TRACE( "file no longer exists %s\n", debugstr_a(names->unix_name) );
         return STATUS_SUCCESS;
     }
+#ifdef WINE_IOS
+    if (ios_dir_trace)
+        ERR( "iosdir-entry: %s attr=%08x mode=%07o size=%ld\n", debugstr_a(names->unix_name),
+             (unsigned int)attributes, (unsigned int)st.st_mode, (long)st.st_size );
+#endif
     if (is_ignored_file( &st ))
     {
+#ifdef WINE_IOS
+        if (ios_dir_trace)
+            ERR( "iosdir-entry: %s ignored mode=%07o\n", debugstr_a(names->unix_name), (unsigned int)st.st_mode );
+#endif
         TRACE( "ignoring file %s\n", debugstr_a(names->unix_name) );
         return STATUS_SUCCESS;
     }
@@ -2970,25 +2988,41 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
 #ifdef WINE_IOS
         {
             char ios_probe_path[PATH_MAX];
-            ERR( "iosdir: path=%s mask=%s class=%u single=%u restart=%u\n",
-                 getcwd( ios_probe_path, sizeof(ios_probe_path) ) ? ios_probe_path : "?",
-                 debugstr_us( mask ), info_class, single_entry, restart_scan );
+            const char *ios_path = getcwd( ios_probe_path, sizeof(ios_probe_path) );
+            ERR( "iosdir: path=%s mask=%s class=%u single=%u restart=%u len=%u\n",
+                 ios_path ? ios_path : "?", debugstr_us( mask ), info_class, single_entry,
+                 restart_scan, (unsigned int)length );
+            ios_dir_trace = ios_path && strstr( ios_path, "OTAPlugins" );
         }
 #endif
         if (!(status = get_cached_dir_data( handle, &data, fd, mask, restart_scan )))
         {
             union file_directory_info *last_info = NULL;
-
 #ifdef WINE_IOS
+            unsigned int written = 0;
+#endif
+
+#if defined(WINE_IOS)
             ERR( "iosdir: entries=%u\n", data->count );
 #endif
             while (!status && data->pos < data->count)
             {
+#ifdef WINE_IOS
+                union file_directory_info *prev_info = last_info;
+#endif
                 status = get_dir_data_entry( data, buffer, io, length, info_class, &last_info );
                 if (!status || status == STATUS_BUFFER_OVERFLOW) data->pos++;
+#ifdef WINE_IOS
+                if (last_info != prev_info) written++;
+#endif
                 if (single_entry && last_info) break;
             }
 
+#ifdef WINE_IOS
+            if (ios_dir_trace)
+                ERR( "iosdir: copied=%u status=%08x information=%lu of %u entries\n",
+                     written, (unsigned int)status, (unsigned long)io->Information, data->count );
+#endif
             if (!last_info) status = STATUS_NO_MORE_FILES;
             else if (status == STATUS_MORE_ENTRIES) status = STATUS_SUCCESS;
         }

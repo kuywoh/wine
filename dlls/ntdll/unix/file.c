@@ -2686,7 +2686,13 @@ static NTSTATUS read_directory_data_readdir( struct dir_data *data, const UNICOD
     NTSTATUS status = STATUS_NO_MEMORY;
     DIR *dir = opendir( "." );
 
-    if (!dir) return STATUS_NO_SUCH_FILE;
+    if (!dir)
+    {
+#ifdef WINE_IOS
+        ERR( "iosdir: opendir(\".\") failed errno=%d (%s)\n", errno, strerror( errno ) );
+#endif
+        return STATUS_NO_SUCH_FILE;
+    }
 
     if (!append_entry( data, ".", NULL, mask )) goto done;
     if (!append_entry( data, "..", NULL, mask )) goto done;
@@ -2937,10 +2943,18 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
     if (!buffer) return STATUS_ACCESS_VIOLATION;
 
     if ((status = server_get_unix_fd( handle, FILE_LIST_DIRECTORY, &fd, &needs_close, &type, NULL )))
+    {
+#ifdef WINE_IOS
+        ERR( "iosdir: server_get_unix_fd failed status=%x\n", status );
+#endif
         return status;
+    }
 
     if (type != FD_TYPE_DIR)
     {
+#ifdef WINE_IOS
+        ERR( "iosdir: handle %p is not a directory (type=%d)\n", handle, type );
+#endif
         if (needs_close) close( fd );
         return STATUS_INVALID_PARAMETER;
     }
@@ -2953,10 +2967,21 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
     cwd = open( ".", O_RDONLY );
     if (fchdir( fd ) != -1)
     {
+#ifdef WINE_IOS
+        {
+            char ios_probe_path[PATH_MAX];
+            ERR( "iosdir: path=%s mask=%s class=%u single=%u restart=%u\n",
+                 getcwd( ios_probe_path, sizeof(ios_probe_path) ) ? ios_probe_path : "?",
+                 debugstr_us( mask ), info_class, single_entry, restart_scan );
+        }
+#endif
         if (!(status = get_cached_dir_data( handle, &data, fd, mask, restart_scan )))
         {
             union file_directory_info *last_info = NULL;
 
+#ifdef WINE_IOS
+            ERR( "iosdir: entries=%u\n", data->count );
+#endif
             while (!status && data->pos < data->count)
             {
                 status = get_dir_data_entry( data, buffer, io, length, info_class, &last_info );
@@ -2967,6 +2992,9 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
             if (!last_info) status = STATUS_NO_MORE_FILES;
             else if (status == STATUS_MORE_ENTRIES) status = STATUS_SUCCESS;
         }
+#ifdef WINE_IOS
+        else ERR( "iosdir: get_cached_dir_data failed status=%x\n", status );
+#endif
         if (cwd == -1 || fchdir( cwd ) == -1) chdir( "/" );
     }
     else status = errno_to_status( errno );

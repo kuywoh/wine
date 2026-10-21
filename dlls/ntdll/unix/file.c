@@ -2992,7 +2992,7 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
             ERR( "iosdir: path=%s mask=%s class=%u single=%u restart=%u len=%u\n",
                  ios_path ? ios_path : "?", debugstr_us( mask ), info_class, single_entry,
                  restart_scan, (unsigned int)length );
-            ios_dir_trace = ios_path && strstr( ios_path, "OTAPlugins" );
+            ios_dir_trace = ios_path && (strstr( ios_path, "OTAPlugins" ) || strstr( ios_path, "BuiltIn" ));
         }
 #endif
         if (!(status = get_cached_dir_data( handle, &data, fd, mask, restart_scan )))

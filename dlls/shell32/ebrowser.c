@@ -656,8 +656,16 @@ static LRESULT navpane_on_wm_size_move(ExplorerBrowserImpl *This)
 
 static LRESULT navpane_on_wm_destroy(ExplorerBrowserImpl *This)
 {
-    INameSpaceTreeControl2_TreeUnadvise(This->navpane.pnstc2, This->navpane.nstc_cookie);
-    INameSpaceTreeControl2_Release(This->navpane.pnstc2);
+    /* iPad (Madeira 0.743 run): CoCreateInstance(CLSID_NamespaceTreeControl) fails when
+     * explorerframe.dll is absent (0xc0000135 in com_get_class_object), leaving pnstc2 NULL
+     * while the window is still destroyed and receives WM_DESTROY. The unguarded
+     * TreeUnadvise/Release vtable call on NULL raised a c0000005 inside the
+     * KiUserCallbackDispatcher teardown (never resumed; the caller wedged). */
+    if (This->navpane.pnstc2)
+    {
+        INameSpaceTreeControl2_TreeUnadvise(This->navpane.pnstc2, This->navpane.nstc_cookie);
+        INameSpaceTreeControl2_Release(This->navpane.pnstc2);
+    }
     This->navpane.pnstc2 = NULL;
     return TRUE;
 }

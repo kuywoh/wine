@@ -244,6 +244,53 @@ static unsigned int dir_data_cache_size;
 #ifdef WINE_IOS
 /* set while querying a directory we want per-entry detail for */
 static BOOL ios_dir_trace;
+/* ml665: [file-op] probe — armed when any op references a place file
+ * (.rbxl/.rbxlx); afterwards every NT->unix name resolution is logged, so
+ * "open attempted (succeeded/failed)" is distinguishable from "never issued". */
+static int ios_file_probe;
+static unsigned int ios_file_probe_cnt;
+
+static int ios_tail_match( const UNICODE_STRING *us, const char *tail, int tl )
+{
+    const WCHAR *p;
+    int len = us ? us->Length / sizeof(WCHAR) : 0, i;
+    if (len < tl) return 0;
+    p = us->Buffer + len - tl;
+    for (i = 0; i < tl; i++)
+    {
+        WCHAR c = p[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if ((WCHAR)(unsigned char)tail[i] != c) return 0;
+    }
+    return 1;
+}
+
+static void ios_file_gate( const UNICODE_STRING *us )
+{
+    if (ios_file_probe) return;
+    if (ios_tail_match( us, ".rbxlx", 6 ) || ios_tail_match( us, ".rbxl", 5 ))
+    {
+        ios_file_probe = 1;
+        dprintf( 2, "[file-op] ml665 gate set on %s\n", debugstr_us( us ) );
+    }
+}
+
+static void ios_file_op_trace( OBJECT_ATTRIBUTES *attr, unsigned int status, const char *unix_name )
+{
+    const char *name;
+
+    if (!ios_file_probe) return;
+    if (ios_file_probe_cnt >= 4000)
+    {
+        if (ios_file_probe_cnt++ == 4000)
+            dprintf( 2, "[file-op] ml665 print cap reached\n" );
+        return;
+    }
+    ios_file_probe_cnt++;
+    name = (attr && attr->ObjectName && attr->ObjectName->Buffer) ? debugstr_us( attr->ObjectName ) : "-";
+    dprintf( 2, "[file-op] ml665 #%u name=%s status=0x%08x unix=%s\n",
+             ios_file_probe_cnt, name, status, unix_name ? unix_name : "-" );
+}
 #endif
 
 static BOOL show_dot_files;
@@ -2993,6 +3040,7 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
                  ios_path ? ios_path : "?", debugstr_us( mask ), info_class, single_entry,
                  restart_scan, (unsigned int)length );
             ios_dir_trace = ios_path && (strstr( ios_path, "OTAPlugins" ) || strstr( ios_path, "BuiltIn" ));
+            ios_file_gate( mask );
         }
 #endif
         if (!(status = get_cached_dir_data( handle, &data, fd, mask, restart_scan )))
@@ -3794,6 +3842,9 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
     name     = attr->ObjectName->Buffer;
     name_len = attr->ObjectName->Length / sizeof(WCHAR);
 
+#ifdef WINE_IOS
+    ios_file_gate( attr->ObjectName );
+#endif
     if (!name_len || name[0] != '\\') return STATUS_OBJECT_PATH_SYNTAX_BAD;
 
     if (!(nt_pos = get_dos_prefix_len( attr->ObjectName )))
@@ -3876,9 +3927,15 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
     if (status == STATUS_SUCCESS || status == STATUS_NO_SUCH_FILE)
     {
         *unix_name_ret = unix_name;
+#ifdef WINE_IOS
+        ios_file_op_trace( attr, status, unix_name );
+#endif
     }
     else
     {
+#ifdef WINE_IOS
+        ios_file_op_trace( attr, status, NULL );
+#endif
         free( unix_name );
     }
     return status;
@@ -3910,6 +3967,9 @@ static NTSTATUS nt_to_unix_file_name( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
     name     = attr->ObjectName->Buffer;
     name_len = attr->ObjectName->Length / sizeof(WCHAR);
 
+#ifdef WINE_IOS
+    ios_file_gate( attr->ObjectName );
+#endif
     if (name_len && name[0] == '\\') return STATUS_INVALID_PARAMETER;
 
     unix_len = name_len * 3 + MAX_DIR_ENTRY_LEN + 3;
@@ -3942,6 +4002,10 @@ static NTSTATUS nt_to_unix_file_name( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
         TRACE( "%s not found in %s\n", debugstr_w(name), unix_name );
         free( unix_name );
     }
+#ifdef WINE_IOS
+    ios_file_op_trace( attr, status,
+                       (status == STATUS_SUCCESS || status == STATUS_NO_SUCH_FILE) ? unix_name : NULL );
+#endif
     return status;
 }
 

@@ -239,6 +239,12 @@ struct event_sync
                                      * create_server_internal_sync() keep the
                                      * `signaled' bit above and never appear in
                                      * the shared table. */
+    /* ml1322: lifetime counters printed by [evt-life].  n_signal = every
+     * signal_sync()/event_sync_signal(1) processed by this sync; n_release =
+     * how many waiter threads those signals actually released.  An owner with
+     * n_release < n_signal while [srv-stuck] shows a linked waiter equals a
+     * swallowed wake, the exact run-#32 fingerprint. */
+    unsigned int   n_signal, n_release;
 #endif
 };
 
@@ -335,6 +341,8 @@ static struct object *create_event_sync( int manual, int signaled )
     event->manual   = manual;
     event->signaled = signaled;
 #ifdef WINE_IOS
+    event->n_signal = 0;   /* ml1322 */
+    event->n_release = 0;  /* ml1322 */
     /* ml952: only handle-reachable events get a cell, and a full table just
      * means this one keeps the old all-server behaviour. */
     event->cell = madeira_cell_alloc( manual, signaled );
@@ -351,6 +359,8 @@ struct event_sync *create_server_internal_sync( int manual, int signaled )
     event->manual   = manual;
     event->signaled = signaled;
 #ifdef WINE_IOS
+    event->n_signal = 0;   /* ml1322 */
+    event->n_release = 0;  /* ml1322 */
     event->cell = -1;   /* internal syncs are never handed to a client */
 #endif
 
@@ -538,16 +548,21 @@ static int event_sync_signal( struct object *obj, unsigned int access, int signa
                 madeira_cell_xchg_state( cell, MADEIRA_CELL_DISABLED );
             else if (signal)
             {
+                event->n_signal++;                     /* ml1322 */
                 if (__atomic_load_n( &cell->waiters, __ATOMIC_SEQ_CST ))
                     madeira_fast_wake( madeira_cell_futex( cell ), event->manual );
-                wake_up( &event->obj, !event->manual );
+                event->n_release += wake_up( &event->obj, !event->manual );
             }
             return 1;
         }
     }
 #endif
     /* wake up all waiters if manual reset, a single one otherwise */
-    if ((event->signaled = !!signal)) wake_up( &event->obj, !event->manual );
+    if ((event->signaled = !!signal))
+    {
+        event->n_signal++;                             /* ml1322 */
+        event->n_release += wake_up( &event->obj, !event->manual );
+    }
     return 1;
 }
 
@@ -845,7 +860,26 @@ int ios_evt_dump_for( void *obj )
     {
         struct ios_evt_stats *st = &((struct event *)obj)->ios;
         unsigned int k, shown = 0;
+#ifdef WINE_IOS
+        /* ml1322: server-side signal/release reconciliation for this wrapper's
+         * sync. n_signal = signal_sync() calls processed; n_release = waiters
+         * those signals actually released. signals>0 with releases==0 while a
+         * [srv-stuck] row shows a linked waiter on this sync = the set was
+         * processed server-side but no waiter ever woke (run-#32 fingerprint). */
+        struct event_sync *sy = (struct event_sync *)((struct event *)obj)->sync;
+#endif
 
+#ifdef WINE_IOS
+        fprintf( stderr, "[evt-life] obj=%p create=%u SET=%u reset=%u pulse=%u | "
+                         "signals=%u releases=%u | "
+                         "wait begin=%u end=%u timeout=%u success=%u | "
+                         "last_set tid=%04x seq=%u | last_reset tid=%04x seq=%u%s\n",
+                 obj, st->n_create, st->n_set, st->n_reset, st->n_pulse,
+                 sy ? sy->n_signal : 0, sy ? sy->n_release : 0,
+                 st->n_wait_begin, st->n_wait_end, st->n_wait_timeout, st->n_wait_success,
+                 st->last_set_tid, st->last_set_seq, st->last_reset_tid, st->last_reset_seq,
+                 st->n_set ? "" : "   <-- NEVER SET BY ANYONE, for the whole life of this object" );
+#else
         fprintf( stderr, "[evt-life] obj=%p create=%u SET=%u reset=%u pulse=%u | "
                          "wait begin=%u end=%u timeout=%u success=%u | "
                          "last_set tid=%04x seq=%u | last_reset tid=%04x seq=%u%s\n",
@@ -853,6 +887,7 @@ int ios_evt_dump_for( void *obj )
                  st->n_wait_begin, st->n_wait_end, st->n_wait_timeout, st->n_wait_success,
                  st->last_set_tid, st->last_set_seq, st->last_reset_tid, st->last_reset_seq,
                  st->n_set ? "" : "   <-- NEVER SET BY ANYONE, for the whole life of this object" );
+#endif
 
         for (k = 0; k < IOS_EVT_OBJ_RING; k++)
         {

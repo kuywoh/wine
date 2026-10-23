@@ -2170,6 +2170,15 @@ volatile long long ios_xp_yield, ios_xp_yield_slept, ios_xp_delay, ios_xp_delay_
  * wait ended without an item (timeout or other status). */
 volatile long long ios_xp_setio, ios_xp_setio_ex, ios_xp_mrio, ios_xp_mrio_ex, ios_xp_mrio_pend, ios_xp_mrio_to;
 
+/* ml1322: lost-wake slice counters ([xp-api] "slices"). IPA 2.1.6 (runs #30-#32)
+ * wedged place-load with up to 25 wineserver-parked threads whose events were
+ * recorded SET yet never released them (server snapshot: signaled=0 while the
+ * waiter stayed linked) — an intermittent wake/reply loss on the in-process
+ * wineserver↔FEX client boundary. server_wait() now caps infinite waits to a
+ * 250 ms slice and re-issues, so any set that was swallowed is re-evaluated
+ * server-side on the next entry within 250 ms at the latest. */
+volatile long long ios_xp_wait_slices, ios_xp_slice_wakes;
+
 /* ml1133: ECO QoS. Across ph-rdr82..88 the SoC clamped the CPU clock after the
  * same ~250 J of CPU energy spent above ~2.3 W (six runs within +-3 %). The
  * loading screen spent 89-96 % of that at 4.5-5.6 W before gameplay began, so

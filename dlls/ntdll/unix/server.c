@@ -806,6 +806,40 @@ unsigned int server_wait( const union select_op *select_op, data_size_t size, UI
         abs_timeout -= now.QuadPart;
     }
 
+#ifdef WINE_IOS
+    /* ml1322: lost-wake slice cap. iOS runs #30-#32 (IPA 2.1.5/2.1.6, Studio
+     * 0.743) wedged place-load with a pool of wineserver-parked threads whose
+     * events were recorded SET yet whose waiter stayed linked with signaled=0
+     * ([evt-life]/[srv-stuck]) — an intermittent wake/reply loss on the
+     * in-process wineserver <-> FEX client boundary. Cap infinite waits to a
+     * 250 ms slice: every re-issued select re-evaluates object state on the
+     * server, so a swallowed set is honored within 250 ms even if its wake
+     * never arrived. Slice STATUS_TIMEOUT never escapes to the caller. */
+    if (abs_timeout == TIMEOUT_INFINITE)
+    {
+        timeout_t slice = -2500000;                  /* 250 ms, relative */
+        data_size_t slice_size = size;
+        int slice_waits = 0;
+
+        extern volatile long long ios_xp_wait_slices, ios_xp_slice_wakes;
+        for (;;)
+        {
+            __sync_fetch_and_add( &ios_xp_wait_slices, 1 );
+            ret = server_select( select_op, slice_size, flags, slice, NULL, &apc );
+            if (ret != STATUS_TIMEOUT) break;
+            /* keep "signal exactly once" for SELECT_SIGNAL_AND_WAIT: after the
+             * first slice the subtracted-only wait is re-issued */
+            if (!slice_waits++ && size >= sizeof(select_op->signal_and_wait) &&
+                select_op->op == SELECT_SIGNAL_AND_WAIT)
+                slice_size = offsetof( union select_op, signal_and_wait.signal );
+            __sync_fetch_and_add( &ios_xp_slice_wakes, 1 );   /* a slice that saw nothing */
+        }
+        if (ret == STATUS_USER_APC) return invoke_user_apc( NULL, &apc, ret );
+        if (ret == STATUS_TIMEOUT) NtYieldExecution();    /* keep server_wait's contract */
+        return ret;
+    }
+#endif
+
     ret = server_select( select_op, size, flags, abs_timeout, NULL, &apc );
     if (ret == STATUS_USER_APC) return invoke_user_apc( NULL, &apc, ret );
 

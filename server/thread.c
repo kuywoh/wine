@@ -1690,20 +1690,24 @@ static int select_on( const union select_op *select_op, data_size_t op_size, cli
     return 0;
 }
 
-/* attempt to wake threads sleeping on the object wait queue */
-void wake_up( struct object *obj, int max )
+/* attempt to wake threads sleeping on the object wait queue.
+ * ml1322: now returns the number of threads actually released, so a set on an
+ * object with linked waiters can be reconciled against [srv-stuck]/[evt-life]. */
+int wake_up( struct object *obj, int max )
 {
     struct list *ptr;
-    int ret;
+    int ret, woken = 0;
 
     LIST_FOR_EACH( ptr, &obj->wait_queue )
     {
         struct wait_queue_entry *entry = LIST_ENTRY( ptr, struct wait_queue_entry, entry );
         if (!(ret = wake_thread( get_wait_queue_thread( entry )))) continue;
+        woken++;
         if (ret > 0 && max && !--max) break;
         /* restart at the head of the list since a wake up can change the object wait queue */
         ptr = &obj->wait_queue;
     }
+    return woken;
 }
 
 /* return the apc queue to use for a given apc type */

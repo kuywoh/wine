@@ -2165,6 +2165,10 @@ NTSTATUS WINAPI NtOpenEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_AT
 volatile long long ios_xp_set_event, ios_xp_reset_event, ios_xp_pulse_event;
 volatile long long ios_xp_wait_single, ios_xp_wait_multi, ios_xp_wait_zero, ios_xp_wait_zero_timeout;
 volatile long long ios_xp_yield, ios_xp_yield_slept, ios_xp_delay, ios_xp_delay_hist[6];
+/* ml1321: IO completion-port counters ([xp-fio]). rmio_pend = remove calls that
+ * found the queue empty and entered the server wait; rmio_to = those whose
+ * wait ended without an item (timeout or other status). */
+volatile long long ios_xp_setio, ios_xp_setio_ex, ios_xp_mrio, ios_xp_mrio_ex, ios_xp_mrio_pend, ios_xp_mrio_to;
 
 /* ml1133: ECO QoS. Across ph-rdr82..88 the SoC clamped the CPU clock after the
  * same ~250 J of CPU energy spent above ~2.3 W (six runs within +-3 %). The
@@ -3994,6 +3998,8 @@ NTSTATUS WINAPI NtSetIoCompletion( HANDLE handle, ULONG_PTR key, ULONG_PTR value
 
     TRACE( "(%p, %lx, %lx, %x, %lx)\n", handle, key, value, status, count );
 
+    __atomic_add_fetch( &ios_xp_setio, 1, __ATOMIC_RELAXED );   /* ml1321 */
+
     SERVER_START_REQ( add_completion )
     {
         req->handle      = wine_server_obj_handle( handle );
@@ -4020,6 +4026,8 @@ NTSTATUS WINAPI NtSetIoCompletionEx( HANDLE completion_handle, HANDLE completion
 
     TRACE( "(%p, %p, %lx, %lx, %x, %lx)\n", completion_handle, completion_reserve_handle,
            key, value, status, count );
+
+    __atomic_add_fetch( &ios_xp_setio_ex, 1, __ATOMIC_RELAXED );   /* ml1321 */
 
     if (!completion_reserve_handle) return STATUS_INVALID_HANDLE;
 
@@ -4048,6 +4056,8 @@ NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *
 
     TRACE( "(%p, %p, %p, %p, %p)\n", handle, key, value, io, timeout );
 
+    __atomic_add_fetch( &ios_xp_mrio, 1, __ATOMIC_RELAXED );   /* ml1321 */
+
     SERVER_START_REQ( remove_completion )
     {
         req->handle = wine_server_obj_handle( handle );
@@ -4063,9 +4073,14 @@ NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *
     }
     SERVER_END_REQ;
     if (status != STATUS_PENDING) return status;
+    __atomic_add_fetch( &ios_xp_mrio_pend, 1, __ATOMIC_RELAXED );   /* ml1321 */
     if (!timeout || timeout->QuadPart) status = server_wait_for_object( wait_handle, FALSE, timeout );
     else                               status = STATUS_TIMEOUT;
-    if (status != WAIT_OBJECT_0) return status;
+    if (status != WAIT_OBJECT_0)
+    {
+        __atomic_add_fetch( &ios_xp_mrio_to, 1, __ATOMIC_RELAXED );   /* ml1321 */
+        return status;
+    }
 
     SERVER_START_REQ( get_thread_completion )
     {
@@ -4094,6 +4109,8 @@ NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORM
     ULONG i = 0;
 
     TRACE( "%p %p %u %p %p %u\n", handle, info, count, written, timeout, alertable );
+
+    __atomic_add_fetch( &ios_xp_mrio_ex, 1, __ATOMIC_RELAXED );   /* ml1321 */
 
     if (!count) return STATUS_INVALID_PARAMETER;
 

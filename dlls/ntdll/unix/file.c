@@ -6566,6 +6566,45 @@ static void ios_js_read_note( HANDLE handle, int unix_fd, const void *buffer, UL
 }
 #endif
 
+#ifdef WINE_IOS
+#include <pthread.h>
+#endif
+
+#ifdef WINE_IOS
+/* ml1321: read/write counters for the app's [xp-fio] reporter plus per-thread
+ * read attribution. The reporter diffes these once a second, so they only ever
+ * accumulate. Races can lose a byte count inside one report window; that is
+ * fine for a measurement. */
+volatile long long ios_xp_read_calls, ios_xp_read_bytes, ios_xp_write_calls, ios_xp_write_bytes;
+volatile int ios_xp_rdthr_tid[48];
+volatile long long ios_xp_rdthr_bytes[48];
+
+void ios_xp_rd_add( long long bytes )
+{
+    uint64_t tid = 0; int i, free_slot = -1;
+    __atomic_add_fetch( &ios_xp_read_calls, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &ios_xp_read_bytes, bytes, __ATOMIC_RELAXED );
+    if (pthread_threadid_np( NULL, &tid ) || !tid) return;
+    for (i = 0; i < 48; i++)
+    {
+        if (ios_xp_rdthr_tid[i] == (int)tid)
+        {
+            __atomic_add_fetch( &ios_xp_rdthr_bytes[i], bytes, __ATOMIC_RELAXED );
+            return;
+        }
+        if (free_slot < 0 && !ios_xp_rdthr_tid[i]) free_slot = i;
+    }
+    if (free_slot >= 0 && __sync_bool_compare_and_swap( (volatile int *)&ios_xp_rdthr_tid[free_slot], 0, (int)tid ))
+        __atomic_add_fetch( &ios_xp_rdthr_bytes[free_slot], bytes, __ATOMIC_RELAXED );
+}
+
+void ios_xp_wr_add( long long bytes )
+{
+    __atomic_add_fetch( &ios_xp_write_calls, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &ios_xp_write_bytes, bytes, __ATOMIC_RELAXED );
+}
+#endif /* WINE_IOS */
+
 NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
                             IO_STATUS_BLOCK *io, void *buffer, ULONG length,
                             LARGE_INTEGER *offset, ULONG *key )
@@ -6609,7 +6648,7 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
      * the interesting handle appears. (That exact mistake cost a run earlier in
      * this investigation -- probe the value in question, not the call count.) */
     {
-        static HANDLE ml955_seen[48];
+        static HANDLE ml955_seen[512];
         static int ml955_n;
         int ml955_i, ml955_dup = 0;
 
@@ -6633,15 +6672,31 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
             ml955_types[FD_TYPE_CHAR]    = "CHAR";
             ml955_types[FD_TYPE_DEVICE]  = "DEVICE";
             ml955_seen[ml955_n++] = handle;
-            ERR( "ml955 [read-src] #%d handle=%p type=%s(%d) options=%08x len=%u offset=%s%I64x async=%d\n",
+            /* ml1321: name file rows with F_GETPATH so the place-open read
+             * windows are identifiable, not just type/length stats. Run
+             * #31's startup consumed all 48 cap slots long before the file
+             * dialog opened, hiding the +20.4/+86 read phases entirely. */
+            const char *ml955_name = "";
+            char ml955_path[560];
+            if (!status && (int)type == FD_TYPE_FILE && fcntl( unix_handle, F_GETPATH, ml955_path ) == 0 && ml955_path[0])
+            {
+                size_t ml955_pl = strlen( ml955_path );
+                ml955_name = ml955_pl > 384 ? ml955_path + (ml955_pl - 384) : ml955_path;
+            }
+            ERR( "ml955 [read-src] #%d handle=%p type=%s(%d) options=%08x len=%u off=%llx async=%d name=%s\n",
                  ml955_n, handle,
                  ((int)type >= 0 && (int)type < FD_TYPE_NB_TYPES && ml955_types[(int)type])
                      ? ml955_types[(int)type] : "?",
                  (int)type, options, length,
-                 offset ? "" : "(none) ", offset ? offset->QuadPart : 0,
-                 !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) );
+                 (unsigned long long)(offset ? offset->QuadPart : 0),
+                 !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)),
+                 ml955_name );
         }
     }
+#endif
+
+#ifdef WINE_IOS
+    ios_xp_rd_add( (long long)length );   /* ml1321: requested size; short/failed reads ride along */
 #endif
 
     if (status == STATUS_BAD_DEVICE_TYPE)
@@ -6941,6 +6996,10 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
         status = STATUS_INVALID_USER_BUFFER;
         goto done;
     }
+
+#ifdef WINE_IOS
+    ios_xp_wr_add( (long long)length );   /* ml1321 */
+#endif
 
     if (status == STATUS_BAD_DEVICE_TYPE)
         return server_write_file( handle, event, apc, apc_user, io, buffer, length, offset, key );

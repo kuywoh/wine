@@ -560,8 +560,12 @@ static int event_sync_signal( struct object *obj, unsigned int access, int signa
     /* wake up all waiters if manual reset, a single one otherwise */
     if ((event->signaled = !!signal))
     {
+#ifdef WINE_IOS
         event->n_signal++;                             /* ml1322 */
         event->n_release += wake_up( &event->obj, !event->manual );
+#else
+        wake_up( &event->obj, !event->manual );
+#endif
     }
     return 1;
 }
